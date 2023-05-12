@@ -1,0 +1,101 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  fastapi response streaming
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 60
+
+Resources:
+  AppApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      AlwaysDeploy: true
+
+  GetStreamResponse:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AppApi
+      ParentId: !GetAtt AppApi.RootResourceId
+      PathPart: getStream
+
+  GetStreamMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref AppApi
+      ResourceId: !Ref GetStreamResponse
+      HttpMethod: GET
+      AuthorizationType: AWS_IAM
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: GET
+        # Uri: https://a7un3ypszvrglxhusjqdwk6wom0byaiy.lambda-url.us-east-1.on.aws/
+        Uri: !GetAtt FastAPIFunctionUrl.FunctionUrl
+
+  FastAPIFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: app/
+      Handler: run.sh
+      Runtime: python3.9
+      MemorySize: 256
+      Environment:
+        Variables:
+          AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
+          AWS_LWA_INVOKE_MODE: response_stream
+          PORT: 8000
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:753240598075:layer:LambdaAdapterLayerX86:16
+      FunctionUrlConfig:
+        AuthType: AWS_IAM
+        InvokeMode: RESPONSE_STREAM
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /nonce
+            Method: GET
+            RestApiId: !Ref AppApi
+            RequestParameters:
+              - method.request.path.address:
+                  Required: True
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        PriceClass: PriceClass_All
+        HttpVersion: http2
+        IPV6Enabled: true
+        Comment: Distribution with Lambda Function URL
+        Origins:
+          - DomainName:
+              !Select [2, !Split ['/', !GetAtt FastAPIFunctionUrl.FunctionUrl]]
+            Id: LambdaOrigin
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+        Enabled: true
+        DefaultCacheBehavior:
+          TargetOriginId: LambdaOrigin
+          CachePolicyId: '658327ea-f89d-4fab-a63d-7e88639e58f6'
+          ViewerProtocolPolicy: redirect-to-https
+          SmoothStreaming: true
+          Compress: true
+
+Outputs:
+  FastAPIFunctionUrl:
+    Description: 'Function URL for FastAPI function'
+    Value: !GetAtt FastAPIFunctionUrl.FunctionUrl
+  FastAPIFunction:
+    Description: 'FastAPI Lambda Function ARN'
+    Value: !GetAtt FastAPIFunction.Arn
+  CloudFrontDomain:
+    Description: CloudFront domain name
+    Value: !Sub https://${CloudFrontDistribution.DomainName}/
+  ApiEndpointUrl:
+    Description: 'REST Edge-optimized endpoint URL'
+    Value: !Sub 'https://${AppApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
